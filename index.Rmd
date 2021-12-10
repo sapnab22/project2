@@ -1,0 +1,328 @@
+---
+title: 'Project 2: Data Mining, Classification, Prediction'
+author: "SDS322E"
+date: ''
+output:
+  html_document:
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+  pdf_document:
+    toc: no
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, fig.align = "center", warning = F, message = F,
+tidy=TRUE, tidy.opts=list(width.cutoff=60), R.options=list(max.print=100))
+
+class_diag <- function(score, truth, positive, cutoff=.5){
+
+  pred <- factor(score>cutoff,levels=c("TRUE","FALSE"))
+  truth <- factor(truth==positive, levels=c("TRUE","FALSE"))
+
+  tab<-table(truth, pred)
+  acc=sum(diag(tab))/sum(tab)
+  sens=tab[1,1]/rowSums(tab)[1]
+  spec=tab[2,2]/rowSums(tab)[2]
+  ppv=tab[1,1]/colSums(tab)[1]
+
+#CALCULATE F1
+  f1=2*(sens*ppv)/(sens+ppv)
+  
+#CALCULATE EXACT AUC
+  truth<-as.numeric(truth=="TRUE")
+  ord<-order(score, decreasing=TRUE)
+  score <- score[ord]; truth <- truth[ord]
+  TPR=cumsum(truth)/max(1,sum(truth))
+  FPR=cumsum(!truth)/max(1,sum(!truth))
+  dup<-c(score[-1]>=score[-length(score)], FALSE)
+  TPR<-c(0,TPR[!dup],1); FPR<-c(0,FPR[!dup],1)
+  n <- length(TPR)
+  auc<- sum( ((TPR[-1]+TPR[-n])/2) * (FPR[-1]-FPR[-n]) )
+  round(data.frame(acc,sens,spec,ppv,f1,ba=(sens+spec)/2,auc, row.names = "Metrics"),4)
+}
+```
+
+# Mining, Classification, Prediction
+
+## Sapna Bhakta sab5574
+
+### Introduction 
+
+I chose to use the Salaries dataset that is within the carData library. It contains 397 observations and 6 variables. The rank is a factor with levels AssocProf, AsstProf, and Prof. The discipline is a factor with levels A("theoretical" departments) or B("applied" departments). There are three numerical variables, the yrs.since.phd (years since phD), yrs.service (years of service) and salary. The last variable is sex with levels Female and Male and is used as our binary variable. There are 358 males, 39 females, 181 in discipline A and 216 in discipline B. I found this dataset interesting because I was curious if the numerical variables would be related to a professor's gender. 
+
+```{R}
+library(tidyverse)
+library(carData)
+library(GGally)
+df <- Salaries
+nrow(df)
+length(which(df$sex == "Male"))
+length(which(df$sex == "Female"))
+length(which(df$discipline == "A"))
+length(which(df$discipline == "B"))
+
+```
+
+### Cluster Analysis
+
+```{R}
+library(cluster)
+pam_dat<-df%>%select(yrs.since.phd,yrs.service,salary)
+sil_width<-vector()
+for(i in 2:10){  
+  pam_fit <- pam(pam_dat, k = i)  
+  sil_width[i] <- pam_fit$silinfo$avg.width  
+}
+ggplot()+geom_line(aes(x=1:10,y=sil_width))+scale_x_continuous(name="k",breaks=1:10)
+```
+```{r}
+pam1 <- df %>% pam(k=2)
+pam1
+pamclust<- df %>% mutate(cluster=as.factor(pam1$clustering))
+pamclust <- pamclust[, c(1,2,3,4,6,5,7)]
+pamclust %>% ggplot(aes(yrs.since.phd,salary,color=cluster)) + geom_point()
+ggpairs(pamclust, columns=3:5, aes(color=cluster))
+```
+```{r}
+pam1$silinfo$avg.width
+```
+
+From the first graph we can see that the silhouette width is maximized at k=2. With an averaged width of .6132, a reasonable structure has been found but there is room for improvement. From the first graph, we can see that cluster one is more towards the higher values of salary and the range for salaries for cluster 2 is wider. From the pairs graph, we can see that for salary, the two clusters differ the most with little overlap. For years since phd, cluster 2 seems to be shifted to the left with a longer tail than cluster 1. For years of service, cluster 2 also appears to be shifted to the left but following the same shape as cluster 1. 
+    
+    
+### Dimensionality Reduction with PCA
+
+```{R}
+df_nums <- df %>% select_if(is.numeric) %>% scale
+pca <- princomp(df_nums)
+summary(pca, loadings = T)
+```
+```{r}
+eigval <- pca$sdev^2 #square to convert SDs to eigenvalues
+varprop=round(eigval/sum(eigval), 2) #proportion of var explained by each PC
+
+ggplot() + geom_bar(aes(y=varprop, x=1:3), stat="identity") + xlab("") + geom_path(aes(y=varprop, x=1:3)) + 
+  geom_text(aes(x=1:3, y=varprop, label=round(varprop, 2)), vjust=1, col="white", size=5) + 
+  scale_y_continuous(breaks=seq(0, .6, .2), labels = scales::percent) + 
+  scale_x_continuous(breaks=1:10)
+```
+```{r}
+library(factoextra)
+fviz_pca_biplot(pca) + coord_fixed() 
+```
+
+If we look at the eigenvalues, only PCA1 has a value greater than 1. If we look at the graph the cumulative proportion of variances is greather than 80% if we keep PCA1 and PCA2. The graph also indicates a bend after PCA2, therefor I would choose to keep the first two PCA's.  
+
+From the loadings, we can analyze the data. PC1 indicates general strength with all values being positive and semi-close together (salary is a little lower). Since years since phd and years service are higher they are stronger. PC2 is a years since phd and years service versus salary. Higher scores on PC2 mean a lower salary and low scores on PC2 mean a higher salary. If we were to interpret PC3 it would be years since phd versus years service. A high score indicating a higher years since phd and a lower years service and vise versa for a low score. We can additionally see the relationships on the graph above. 
+
+###  Linear Classifier
+```{r}
+class_diag <- function(score, truth, positive, cutoff=.5, strictlygreater=T){
+  if(strictlygreater==T) pred <- factor(score>cutoff,levels=c("TRUE","FALSE"))
+  else pred <- factor(score>=cutoff,levels=c("TRUE","FALSE"))
+  truth <- factor(truth==positive, levels=c("TRUE","FALSE"))
+  tab<-table(truth, pred)
+  acc=sum(diag(tab))/sum(tab)
+  sens=tab[1,1]/rowSums(tab)[1]
+  spec=tab[2,2]/rowSums(tab)[2]
+  ppv=tab[1,1]/colSums(tab)[1]
+#CALCULATE F1
+  f1=2*(sens*ppv)/(sens+ppv)
+#CALCULATE EXACT AUC
+  truth<-as.numeric(truth=="TRUE")
+  ord<-order(score, decreasing=TRUE)
+  score <- score[ord]; truth <- truth[ord]
+  TPR=cumsum(truth)/max(1,sum(truth))
+  FPR=cumsum(!truth)/max(1,sum(!truth))
+  dup<-c(score[-1]>=score[-length(score)], FALSE)
+  TPR<-c(0,TPR[!dup],1); FPR<-c(0,FPR[!dup],1)
+  n <- length(TPR)
+  auc<- sum( ((TPR[-1]+TPR[-n])/2) * (FPR[-1]-FPR[-n]) )
+  round(data.frame(acc,sens,spec,ppv,f1,ba=(sens+spec)/2,auc, row.names = "Metrics"),4)
+} 
+```
+
+```{R}
+
+#model for discipline
+fit <- glm(discipline ~ yrs.since.phd + yrs.service + salary, data=df, family="binomial")
+probs_glm <- predict(fit, type="response")
+class_diag(probs_glm,df$discipline,positive="A")
+#model for sex
+fit <- glm(sex ~ yrs.since.phd + yrs.service + salary, data=df, family="binomial")
+probs_glm <- predict(fit, type="response")
+class_diag(probs_glm,df$sex,positive="Male")
+
+
+# I am going to use the model for sex for the next steps. 
+```
+
+```{R}
+df$probs_glm <- probs_glm
+library(caret)
+mean(probs_glm)
+y <- df$sex
+y <- factor(y, levels=c("Male","Female"))
+x <- df$probs_glm
+yhat <- ifelse(x>.9017632, "Male", "Female")
+yhat <- factor(yhat, levels=c("Male","Female"))
+table(actual=y, predicted=yhat) %>% addmargins
+
+```
+
+```{R}
+set.seed(322)
+k=10
+
+data<-sample_frac(df) #randomly order rows
+folds <- rep(1:k, length.out=nrow(data)) #create folds
+
+diags<-NULL
+
+i=1
+for(i in 1:k){
+# create training and test sets
+train<-data[folds!=i,] 
+test<-data[folds==i,] 
+truth<-test$sex
+
+# train model
+fit <- glm(sex ~ yrs.since.phd + yrs.service + salary,data=df,family="binomial")
+
+# test model
+probs <- predict(fit,newdata = test,type="response")
+
+# get performance metrics for each fold
+diags<-rbind(diags,class_diag(probs,truth,positive="Male")) }
+
+#average performance metrics across all folds
+summarize_all(diags,mean)
+
+```
+
+
+I used logistic regression for my linear classifier. When taking the mean of the probabilities, a value of .90176 is produced. Therefor, it is used as the cutoff when creating the confusion matrix in order to maximize accuracy. The first AUC value is .6747 which is a pretty poor model. After performing the cross validation the AUC slightly increases to .67897 which is still a poor model but does not show signs of overfitting and it is improving which is a good thing. 
+
+### Non-Parametric Classifier
+
+```{r}
+library(caret)
+knn_fit <- knn3(sex ~ yrs.since.phd + yrs.service + salary, data=df)
+
+probs_knn <- predict(knn_fit, df)
+class_diag(probs_knn[,2], df$sex, positive="Male")
+```
+
+```{r}
+
+mean(probs_knn[,2])
+yhat <- ifelse(probs_knn[,2]>0.9030027, "Male", "Female")
+yhat <- factor(yhat, levels=c("Male","Female"))
+table(actual=y,
+      predicted= yhat) %>% addmargins
+```
+
+```{r}
+k=10
+
+data<-sample_frac(df) #randomly order rows
+folds <- rep(1:k, length.out=nrow(df)) #create folds
+
+diags<-NULL
+
+i=1
+for(i in 1:k){
+# create training and test sets
+train<-data[folds!=i,] 
+test<-data[folds==i,] 
+truth<-test$sex
+
+# train model
+fit <- knn3(sex ~ yrs.since.phd + yrs.service + salary,data=df)
+
+# test model
+probs <- predict(fit,newdata = test)[,2]
+
+# get performance metrics for each fold
+diags<-rbind(diags,class_diag(probs,truth, positive="Male")) }
+
+#average performance metrics across all folds
+summarize_all(diags,mean)
+```
+
+I chose k-nearest-neighbors for my non-parametric classifier. When taking the mean of the probabilities, a value of .903 is produced. Therefor, it is used as the cutoff when creating the confusion matrix in order to maximize accuracy. The first AUC value is .8807 which is a pretty good model. After performing the cross validation the AUC has a bigger increase to .90073 which is an improvement to a good model. Since the auc value increased this does not show signs of overfitting. 
+
+
+### Regression/Numeric Prediction
+
+```{R}
+fit<-lm(yrs.since.phd~salary+yrs.service,data=df) 
+yhat<-predict(fit) 
+mean((df$yrs.since.phd-yhat)^2)
+```
+
+```{R}
+k=5 #choose number of folds
+data<-df[sample(nrow(df)),] #randomly order rows
+folds<-cut(seq(1:nrow(df)),breaks=k,labels=F) #create folds
+diags<-NULL
+for(i in 1:k){
+  train<-data[folds!=i,]
+  test<-data[folds==i,]
+  ## Fit linear regression model to training set
+  fit<-lm(yrs.since.phd~salary+yrs.service,data=df)
+  ## Get predictions/y-hats on test set (fold i)
+  yhat<-predict(fit,newdata=test)
+  ## Compute prediction error  (MSE) for fold i
+  diags<-mean((df$yrs.since.phd-yhat)^2)
+}
+mean(diags) ## get average MSE across all folds (much higher error)!
+```
+
+The first MSE is 25.1263 with a linear regression model of years of service and salary predicting years since phd. Once we complete the cross validation we get a MSE of 316.1535 which is significantly larger. Since the MSe is higher with CV, this shows signs of overfitting. 
+
+### Python 
+```{python}
+data = r.df
+```
+
+```{R}
+library(reticulate)
+use_python("/usr/bin/python3")
+plot <- import("matplotlib")
+plot$use("Agg", force = TRUE)
+
+np <- import("numpy")
+pd <- import("pandas")
+plt <- import("matplotlib.pyplot")
+head(py$data$rank)
+```
+
+```{python}
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+```
+
+```{python}
+
+data.head()
+
+plt.scatter(data["yrs.since.phd"], data["salary"], color="turquoise", alpha=.7)
+plt.xlabel('Years Since PHD')
+plt.ylabel('Salary')
+plt.title('PHD vs. Salary')
+r.plt.show()
+```
+
+I used the r. and py$ functions in order to preview the data. First I see the ranks that are part of the dataset and then I just did a preview of the first five rows. Then I created a plot that has years since phd on the x axis and salary on the y axis. It seems to be scattered throughout with a concentration in the bottom left corner (less years since a phd related to a lower salary). 
+
+### Concluding Remarks
+
+Overall, this dataset was intersting because it shows us some of the relationships between salary, years since phd, years of service, and other variables defining professors. I found the cluster analysis to be interesting since it appears by eye that there is only one real cluster and the rest of the points are quite dispersed which could mean it would be better to analyze further into the specific teachings of each professor (analyzing the discipline variable more specifically, maybe with more data). Overall, I enjoyed working with the dataset and think there is a lot more on the models that could be improved. 
+
+
+
+
